@@ -90,7 +90,7 @@ here are the few things to do:
   ```js
   var r = require('rethinkdbdash')();
   // Or if you do not connect to the default local instance:
-  // var r = require('rethinkdbdash')({host: ..., port: ...});
+  // var r = require('rethinkdbdash')({servers: [{host: ..., port: ...}]});
   ```
 
 2. Remove everything related to a connection:
@@ -133,6 +133,43 @@ removing `toArray`:
   ```
 
 
+#### Using TLS Connections
+
+_Note_: Support for a TLS proxy is experimental.
+
+RethinkDB does not support TLS connections to the server yet, but in case you want
+to run it over an untrusted network and need encryption, you can easily run a TLS proxy
+on your server with:
+
+```js
+var tls = require('tls');
+var net = require('net');
+var tlsOpts = {
+  key: '', // You private key
+  cert: '' // Public certificate
+};
+tls.createServer(tlsOpts, function (encryptedConnection) {
+  var rethinkdbConn = net.connect({
+    host: 'localhost',
+    port: 28015
+  });
+  encryptedConnection.pipe(rethinkdbConn).pipe(encryptedConnection);
+}).listen(29015);
+```
+
+And then safely connect to it with the `tls` option:
+
+```js
+var r = require('rethinkdbdash')({
+  port: 29015,
+  host: 'place-with-no-firewall.com',
+  ssl: true
+});
+```
+
+`ssl` may also be an object that will be passed as the `options` argument to
+[`tls.connect`](http://nodejs.org/api/tls.html#tls_tls_connect_options_callback).
+
 
 ### New features and differences
 
@@ -145,19 +182,59 @@ When you import the driver, as soon as you execute the module, you will create
 a default connection pool (except if you pass `{pool: false}`. The options you
 can pass are:
 
-- `{pool: false}` -- if you do not want to use a connection pool.
-- the options for the connection pool, which can be:
+- `db`: `<string>` - The default database to use if none is mentioned.
+- `user`: `<string>` - The RethinkDB user, default value is admin.
+- `password`: `<string>` - The password for the user, default value is an empty string.
+- `discovery`: `<boolean>` - When true, the driver will regularly pull data from the table `server_status` to
+keep a list of updated hosts, default `false`
+- `pool`: `<boolean>` - Set it to `false`, if you do not want to use a connection pool.
+- `buffer`: `<number>` - Minimum number of connections available in the pool, default `50`
+- `max`: `<number>` - Maximum number of connections available in the pool, default `1000`
+- `timeout`: `<number>` - The number of seconds for a connection to be opened, default `20`
+- `pingInterval`: <number> - if `> 0`, the connection will be pinged every `pingInterval` seconds, default `-1`
+- `timeoutError`: `<number>` - Wait time before reconnecting in case of an error (in ms), default 1000
+- `timeoutGb`: `<number>` - How long the pool keep a connection that hasn't been used (in ms), default 60\*60\*1000
+- `maxExponent`: `<number>` - The maximum timeout before trying to reconnect is 2^maxExponent x timeoutError, default 6 (~60 seconds for the longest wait)
+- `silent`: <boolean> - console.error errors, default `false`
+- `servers`: an array of objects `{host: <string>, port: <number>}` representing RethinkDB nodes to connect to
+- `optionalRun`: <boolean> - if `false`, yielding a query will not run it, default `true`
+
+In case of a single instance, you can directly pass `host` and `port` in the top level parameters.
+
+Examples:
 
 ```js
-{
-    buffer: <number>, // minimum number of connections available in the pool, default 50
-    max: <number>, // maximum number of connections in the pool, default 1000
-    timeout: <number>, // number of seconds for a connection to be opened, default 20
-    timeoutError: <number>, // wait time before reconnecting in case of an error (in ms), default 1000
-    timeoutGb: <number>, // how long the pool keep a connection that hasn't been used (in ms), default 60*60*1000
-    maxExponent: <number>, // the maximum timeout before trying to reconnect is 2^maxExponent*timeoutError, default 6 (~60 seconds for the longest wait)
-    silent: <boolean> // console.error errors (default false)
-}
+// connect to localhost:8080, and let the driver find other instances
+var r = require('rethinkdbdash')({
+    discovery: true
+});
+
+// connect to and only to localhost:8080
+var r = require('rethinkdbdash')();
+
+// Do not create a connection pool
+var r = require('rethinkdbdash')({pool: false});
+
+// Connect to a cluster seeding from `192.168.0.100`, `192.168.0.101`, `192.168.0.102`
+var r = require('rethinkdbdash')({
+    servers: [
+        {host: '192.168.0.100', port: 28015},
+        {host: '192.168.0.101', port: 28015},
+        {host: '192.168.0.102', port: 28015},
+    ]
+});
+
+// Connect to a cluster containing `192.168.0.100`, `192.168.0.100`, `192.168.0.102` and
+use a maximum of 3000 connections and try to keep 300 connections available at all time.
+var r = require('rethinkdbdash')({
+    servers: [
+        {host: '192.168.0.100', port: 28015},
+        {host: '192.168.0.101', port: 28015},
+        {host: '192.168.0.102', port: 28015},
+    ],
+    buffer: 300,
+    max: 3000
+});
 ```
 
 You can also pass `{cursor: true}` if you want to retrieve RethinkDB streams as cursors
@@ -165,54 +242,96 @@ and not arrays by default.
 
 _Note_: The option `{stream: true}` that asynchronously returns a stream is deprecated. Use `toStream` instead.
 
+_Note_: The option `{optionalRun: false}` will disable the optional run for all instances of the driver.
+
+_Note_: Connections are created with TCP keep alive turned on, but some routers seem to ignore this setting. To make
+sure that your connections are kept alive, set the `pingInterval` to the interval in seconds you want the
+driver to ping the connection.
+
+_Note_: The error `__rethinkdbdash_ping__` is used for internal purposes (ping). Do not use it.
+
 #### Connection pool
 
-As mentionned before, `rethinkdbdash` has a connection pool and manage all the connections
+As mentioned before, `rethinkdbdash` has a connection pool and manage all the connections
 itself. The connection pool is initialized as soon as you execute the module.
 
 You should never have to worry about connections in rethinkdbdash. Connections are created
-as they are needed, and in case of failure, the pool will try to open connections with an
+as they are needed, and in case of a host failure, the pool will try to open connections with an
 exponential back off algorithm.
 
-The driver will execute one query per connection as queries are not executed in parallel
-on a single connection at the moment - [rethinkdb/rethinkdb#3296](https://github.com/rethinkdb/rethinkdb/issues/3296).
+The driver execute one query per connection. Now that [rethinkdb/rethinkdb#3296](https://github.com/rethinkdb/rethinkdb/issues/3296)
+is solved, this behavior may be changed in the future.
 
 Because the connection pool will keep some connections available, a script will not
 terminate. If you have finished executing your queries and want your Node.js script
 to exit, you need to drain the pool with:
 
 ```js
-r.getPool().drain();
+r.getPoolMaster().drain();
+```
+
+The pool master by default will log all errors/new states on `stderr`. If you do not
+want to pollute `stderr`, pass `silent: true` when you import the driver. You can retrieve the
+logs by binding a listener for the `log` event on the pool master.
+
+```js
+r.getPoolMaster().on('log', console.log);
 ```
 
 ##### Advanced details about the pool
 
-To access the pool, you can call the method `r.getPool()`.
+The pool is composed of a `PoolMaster` that retrieve connections for `n` pools where `n` is the number of
+servers the driver is connected to. Each pool is connected to a unique host.
 
-The pool can emits a few events:
+To access the pool master, you can call the method `r.getPoolMaster()`.
+
+The pool emits a few events:
 - `draining`: when `drain` is called
 - `queueing`: when a query is added/removed from the queue (queries waiting for a connection), the size of the queue is provided
 - `size`: when the number of connections changes, the number of connections is provided
 - `available-size`: when the number of available connections changes, the number of available connections is provided
 
-
 You can get the number of connections (opened or being opened).
 ```js
-r.getPool().getLength();
+r.getPoolMaster().getLength();
 ```
 
 You can also get the number of available connections (idle connections, without
 a query running on it).
 
 ```js
-r.getPool().getAvailableLength();
+r.getPoolMaster().getAvailableLength();
 ```
 
 You can also drain the pool as mentionned earlier with;
 
 ```js
-r.getPool().drain();
+r.getPoolMaster().drain();
 ```
+
+You can access all the pools with:
+```js
+r.getPoolMaster().getPools();
+```
+
+The pool master emits the `healthy` when its state change. Its state is defined as:
+- healthy when at least one pool is healthy: Queries can be immediately executed or will be queued.
+- not healthy when no pool is healthy: Queries will immediately fail.
+
+A pool being healthy is it has at least one available connection, or it was just
+created and opening a connection hasn't failed.
+
+```js
+r.getPoolMaster().on('healthy', function(healthy) {
+  if (healthy === true) {
+    console.log('We can run queries.');
+  }
+  else {
+    console.log('No queries can be run.');
+  }
+});
+```
+
 
 ##### Note about connections
 
@@ -236,7 +355,7 @@ r.expr([1, 2, 3]).run().then(function(result) {
 ```
 
 ```js
-r.expr([1, 2, 3]).run({cursor: true}).then(function(result) {
+r.expr([1, 2, 3]).run({cursor: true}).then(function(cursor) {
   cursor.toArray().then(function(result) {
     console.log(JSON.stringify(result)) // print [1, 2, 3]
   });
@@ -277,6 +396,9 @@ You can create a [Writable](http://nodejs.org/api/stream.html#stream_class_strea
 or [Transform](http://nodejs.org/api/stream.html#stream_class_stream_transform) streams by
 calling `toStream([connection, ]{writable: true})` or
 `toStream([connection, ]{transform: true})` on a table.
+
+By default, a transform stream will return the saved documents. You can return the primary
+key of the new document by passing the option `format: 'primaryKey'`.
 
 This makes a convenient way to dump a file your database.
 
@@ -375,6 +497,13 @@ Make sure you run a version of Node that supports generators and run:
 npm test
 ```
 
+Longer tests for the pool:
+
+```
+mocha long_test/discovery.js -t 50000
+mocha long_test/static.js -t 50000
+```
+
 
 Tests are also being run on [wercker](http://wercker.com/):
 - Builds: [https://app.wercker.com/#applications/52dffe8ba4acb3ef16010ef8/tab](https://app.wercker.com/#applications/52dffe8ba4acb3ef16010ef8/tab)
@@ -419,9 +548,13 @@ Tests are also being run on [wercker](http://wercker.com/):
 
 - __Can I contribute?__
 
-  Because I would like to give rethinkdbdash to RethinkDB, I would like to
-  keep ownership of the code (mostly because I don't like dealing with legal stuff).
-  So I would rather not merge pull requests. That being said, feedback,
-  bug reports etc. are welcome!
+  Feel free to send a pull request. If you want to implement a new feature, please open
+  an issue first, especially if it's a non backward compatible one.
 
-  If you want to write code, come help with [thinky](https://github.com/neumino/thinky)!
+### Browserify
+
+To build the browser version of rethinkdbdash, run:
+
+```
+node browserify.js
+```
